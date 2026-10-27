@@ -15,13 +15,14 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 import jax
+import numpy as np
 import jax.numpy as jnp
 import numpyro
 from astropy import units as u
 from numpyro import distributions as dist
 
 from unite._compose import compose_from_profiles
-from unite._lsf import _FWHM_TO_SIGMA
+from unite._lsf import _FWHM_TO_SIGMA, _order_lsf_fwhm
 from unite._utils import _get_conversion_factor
 from unite.continuum.compute import eval_continuum, integrate_continuum
 from unite.continuum.config import ContinuumConfiguration
@@ -34,6 +35,13 @@ from unite.line.compute import (
 from unite.line.config import ConfigMatrices, LineConfiguration
 from unite.prior import Fixed, Parameter, Prior, topological_sort
 from unite.spectrum import Spectra, Spectrum
+
+#: Evaluate each higher grating order only over the pixels where its
+#: throughput ratio is non-zero (see the order overlap in ``unite_model``);
+#: ``False`` evaluates it over the full spectrum, for comparison.
+_OVERLAP_ACTIVE_RANGE = True
+#: Pixels added on either side of that range, for the fitted pixel offset.
+_OVERLAP_MARGIN_PIX = 2
 
 # Gaussian kernel half-width in sigma units for the banded LSF convolution.
 # 4 sigma captures >99.99% of the Gaussian area; increasing this has diminishing returns.
@@ -315,11 +323,15 @@ def unite_model(args: ModelArgs) -> None:
         edges = spectrum.edges * wl_scale  # (E,)
         keep_mask = spectrum.keep_mask  # (E-1,)
         edges = edges - (pix_offset * disp.dlam_dpix(spectrum.edges) * wl_scale)
-        widths = jnp.diff(edges)  # (E-1,)
 
         # Scaled line fluxes and continuum for this spectrum.
         scaled_flux = flux_per_line * lfs / norm
         cont_scale_norm = cs / norm
+
+        # Higher-order grating overlap: {m: r_m(λ_obs)} (empty if unused).
+        # Order-m light of intrinsic wavelength λ/m lands at observed λ, so
+        # each term is r_m(λ) * F_1(λ/m) with F_1 evaluated on the λ/m grid.
+        order_overlap = disp.order_overlap
 
         # --- Compute pixel-averaged model ---
         if args.integration_mode == 'convolution':
@@ -381,10 +393,30 @@ def unite_model(args: ModelArgs) -> None:
                 x_flat / (disp.R(x_flat * inv_wl_scale) * r_scale) * _FWHM_TO_SIGMA
             )
 
-            # Convolve on the fine grid, then pixel-average.
+            # Convolve on the fine grid.
             model_fine_conv = _lsf_convolve(
                 x_flat, model_fine_intrinsic, sigma_fine, half_width
             )
+
+            # Order-m overlap: r_m at the observed fine-grid wavelength times
+            # the intrinsic first-order model at x / m, convolved separately:
+            # on the observed axis its LSF FWHM is m times the order-m FWHM
+            # in intrinsic wavelength, i.e. the first-order LSF of the photon
+            # wavelength x / m (R_m(λ) = m R_1(λ)).
+            for m, ratio in order_overlap.items():
+                sigma_m = (
+                    m
+                    * _order_lsf_fwhm(x_flat / m, m, disp.R, r_scale, inv_wl_scale)
+                    * _FWHM_TO_SIGMA
+                )
+                model_fine_conv = model_fine_conv + _lsf_convolve(
+                    x_flat,
+                    ratio(x_flat * inv_wl_scale) * _conv_eval(x_flat / m),
+                    sigma_m,
+                    half_width,
+                )
+
+            # Pixel-average.
             model_pix = model_fine_conv.reshape(n_pixels, n_super).mean(axis=1)
             model = flux_scale * model_pix
         else:
@@ -394,36 +426,98 @@ def unite_model(args: ModelArgs) -> None:
             # Per-edge LSF (length E, shared across all lines of this spectrum).
             lsf_at_edges = edges / (disp.R(edges * inv_wl_scale) * r_scale)
 
-            cum_per_line = _int_fn(
-                edges, centers, lsf_at_edges, p0, p1, p2, _pcodes
-            )  # (n_lines, E)
-            per_interval = jnp.diff(cum_per_line, axis=1) / widths  # (n_lines, E-1)
-            pixints = per_interval[:, keep_mask]  # (n_lines, npix)
-
             # Per-region LSF FWHM (scalar per region) for polynomial-based
-            # continuum forms' analytic Gaussian-moment convolution.
+            # continuum forms' analytic Gaussian-moment convolution.  For the
+            # order-m overlap the region centre λ_c is the intrinsic (photon)
+            # wavelength, so its LSF in intrinsic units is λ_c / (m R(λ_c)).
             if args.cont_config is not None and args.cont_center is not None:
                 cont_centers_obs = jnp.array(args.cont_center) * (1.0 + z_sys)
-                cont_lsf_per_region = cont_centers_obs / (
-                    disp.R(cont_centers_obs * inv_wl_scale) * r_scale
-                )
-            else:
-                cont_lsf_per_region = jnp.zeros(0)
-            cont_per_interval = integrate_continuum(
-                edges, args, context, z_sys, cont_lsf_per_region
-            )  # (E-1,)
-            cont = cont_per_interval[keep_mask] * cont_scale_norm  # (npix,)
 
-            model = flux_scale * compose_from_profiles(
-                pixints,
-                scaled_flux,
-                tau_per_line,
-                cm.is_tau,
-                cm.applies_matrix,
-                args.cont_applies,
-                cont,
-                has_tau=has_tau,
-            )
+                def _cont_lsf(
+                    m, *, _cc=cont_centers_obs, _rs=r_scale, _d=disp, _inv=inv_wl_scale
+                ):
+                    return _order_lsf_fwhm(_cc, m, _d.R, _rs, _inv)
+            else:
+
+                def _cont_lsf(m):
+                    return jnp.zeros(0)
+
+            def _pixavg(
+                e,
+                lsf_e,
+                cont_lsf,
+                *,
+                _keep=keep_mask,
+                _sf=scaled_flux,
+                _csn=cont_scale_norm,
+            ):
+                """Pixel-averaged first-order model on the intervals of edge array ``e``."""
+                cum_per_line = _int_fn(
+                    e, centers, lsf_e, p0, p1, p2, _pcodes
+                )  # (n_lines, E)
+                per_interval = jnp.diff(cum_per_line, axis=1) / jnp.diff(e)
+                pixints = per_interval[:, _keep]  # (n_lines, npix)
+                cont_per_interval = integrate_continuum(
+                    e, args, context, z_sys, cont_lsf
+                )  # (E-1,)
+                cont = cont_per_interval[_keep] * _csn  # (npix,)
+                return compose_from_profiles(
+                    pixints,
+                    _sf,
+                    tau_per_line,
+                    cm.is_tau,
+                    cm.applies_matrix,
+                    args.cont_applies,
+                    cont,
+                    has_tau=has_tau,
+                )
+
+            model_pix = _pixavg(edges, lsf_at_edges, _cont_lsf(1))
+
+            # Order-m overlap: pixel-average F_1 over edges / m with the
+            # order-m LSF at the intrinsic edge wavelengths (R_m(λ) =
+            # m R_1(λ), with R_1 at the photon wavelength λ = edge / m),
+            # scaled by r_m at the observed mid-pixel wavelength.
+            #
+            # Each order is evaluated only over the pixels where its ratio is
+            # non-zero: a fixed range of the spectrum's pixels (from its own
+            # wavelengths, widened by _OVERLAP_MARGIN_PIX pixels for the fitted
+            # pixel offset), cut out once when the model is traced.  Outside
+            # it, r_m vanishes, so the result is unchanged, while the cost of
+            # an order no longer scales with the full spectrum (e.g. G235M/F170LP
+            # second-order light only reaches its red end).
+            if order_overlap:
+                edges_static = np.asarray(spectrum.edges)
+                mids_static = 0.5 * (edges_static[1:] + edges_static[:-1])
+                keep_static = np.asarray(keep_mask)
+                for m, ratio in order_overlap.items():
+                    # (from the support of a tabulated ratio, in plain numbers:
+                    # evaluating the ratio itself would yield a tracer inside
+                    # jit; other callables are evaluated over the full range)
+                    support = getattr(ratio, 'support', None) if _OVERLAP_ACTIVE_RANGE else None
+                    if support is not None:
+                        lo, hi = (float(v) for v in support)
+                        active = np.flatnonzero((mids_static >= lo) & (mids_static <= hi))
+                        if active.size == 0:
+                            continue
+                        i0 = max(int(active[0]) - _OVERLAP_MARGIN_PIX, 0)
+                        i1 = min(int(active[-1]) + 1 + _OVERLAP_MARGIN_PIX, mids_static.size)
+                    else:
+                        i0, i1 = 0, mids_static.size
+                    keep_sub = keep_static[i0:i1]  # (numpy: a jnp slice is traced within jit)
+                    pix0 = int(keep_static[:i0].sum())
+                    n_sub = int(keep_static[i0:i1].sum())
+                    if n_sub == 0:
+                        continue
+                    e_sub = edges[i0 : i1 + 1]
+                    e_m = e_sub / m
+                    lsf_m = _order_lsf_fwhm(e_m, m, disp.R, r_scale, inv_wl_scale)
+                    mids_disp = (0.5 * (e_sub[1:] + e_sub[:-1]))[keep_sub] * inv_wl_scale
+                    model_pix = model_pix.at[pix0 : pix0 + n_sub].add(
+                        ratio(mids_disp) * _pixavg(e_m, lsf_m, _cont_lsf(m), _keep=keep_sub)
+                    )
+
+            model = flux_scale * model_pix
         obs_name = f'obs_{spectrum.name}' if spectrum.name else f'obs_{i}'
         numpyro.sample(
             obs_name,
@@ -787,6 +881,21 @@ class ModelBuilder:
                     r_arr = jnp.asarray(s.disperser.R(pix_mid_disp))
                     lsf = jnp.asarray(pix_mid_disp * wl_scale) / r_arr
                     max_lsf_fwhm = max(max_lsf_fwhm, float(jnp.max(lsf)))
+                    # Overlap kernels: on the observed axis, the first-order
+                    # LSF of the photon wavelength λ / m (where r_m > 0).
+                    for m, ratio in s.disperser.order_overlap.items():
+                        active = jnp.asarray(ratio(pix_mid_disp)) > 0
+                        if bool(jnp.any(active)):
+                            lsf_m = m * _order_lsf_fwhm(
+                                jnp.asarray(pix_mid_disp * wl_scale) / m,
+                                m,
+                                s.disperser.R,
+                                1.0,
+                                1.0 / wl_scale,
+                            )
+                            max_lsf_fwhm = max(
+                                max_lsf_fwhm, float(jnp.max(lsf_m[active]))
+                            )
                     pix_widths = (s.high - s.low) * wl_scale
                     min_dlam = min(min_dlam, float(jnp.min(pix_widths)))
                 max_sigma = max_lsf_fwhm * _FWHM_TO_SIGMA

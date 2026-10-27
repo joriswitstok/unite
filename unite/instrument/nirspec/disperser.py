@@ -25,12 +25,14 @@ token kwargs.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from importlib import resources
 from typing import Literal
 
 import jax.numpy as jnp
 from astropy import units as u
 from astropy.io import fits
+from jax.typing import ArrayLike
 
 from unite.instrument.base import Disperser, FluxScale, PixOffset, RScale
 
@@ -136,6 +138,10 @@ class NIRSpec(Disperser):
         Token for the flux normalisation.
     pix_offset : PixOffset, optional
         Token for the detector pixel displacement.
+    order_overlap : Mapping[int, Callable], optional
+        Higher-order throughput ratios ``{order: r_m(wavelength)}``; see
+        :class:`~unite.instrument.base.Disperser` and
+        :func:`~unite.instrument.nirspec.order_overlap_from_msaexp`.
 
     Notes
     -----
@@ -166,6 +172,7 @@ class NIRSpec(Disperser):
         r_scale: RScale | None = None,
         flux_scale: FluxScale | None = None,
         pix_offset: PixOffset | None = None,
+        order_overlap: Mapping[int, Callable[[ArrayLike], ArrayLike]] | None = None,
     ) -> None:
         grating = grating.lower()
         if grating not in _NIRSPEC_GRATINGS:
@@ -189,6 +196,7 @@ class NIRSpec(Disperser):
             r_scale=r_scale,
             flux_scale=flux_scale,
             pix_offset=pix_offset,
+            order_overlap=order_overlap,
         )
 
         self.grating: str = grating
@@ -255,6 +263,10 @@ class PRISM(NIRSpec):
         Token for the flux normalisation.
     pix_offset : PixOffset, optional
         Token for the detector pixel displacement.
+    order_overlap : Mapping[int, Callable], optional
+        Higher-order throughput ratios ``{order: r_m(wavelength)}``; see
+        :class:`~unite.instrument.base.Disperser` and
+        :func:`~unite.instrument.nirspec.order_overlap_from_msaexp`.
 
     Examples
     --------
@@ -271,6 +283,7 @@ class PRISM(NIRSpec):
         r_scale: RScale | None = None,
         flux_scale: FluxScale | None = None,
         pix_offset: PixOffset | None = None,
+        order_overlap: Mapping[int, Callable[[ArrayLike], ArrayLike]] | None = None,
     ) -> None:
         super().__init__(
             'prism',
@@ -279,6 +292,7 @@ class PRISM(NIRSpec):
             r_scale=r_scale,
             flux_scale=flux_scale,
             pix_offset=pix_offset,
+            order_overlap=order_overlap,
         )
 
     def __repr__(self) -> str:
@@ -305,6 +319,10 @@ class G140M(NIRSpec):
         Token for the flux normalisation.
     pix_offset : PixOffset, optional
         Token for the detector pixel displacement.
+    order_overlap : Mapping[int, Callable], optional
+        Higher-order throughput ratios ``{order: r_m(wavelength)}``; see
+        :class:`~unite.instrument.base.Disperser` and
+        :func:`~unite.instrument.nirspec.order_overlap_from_msaexp`.
 
     Examples
     --------
@@ -321,6 +339,7 @@ class G140M(NIRSpec):
         r_scale: RScale | None = None,
         flux_scale: FluxScale | None = None,
         pix_offset: PixOffset | None = None,
+        order_overlap: Mapping[int, Callable[[ArrayLike], ArrayLike]] | None = None,
     ) -> None:
         super().__init__(
             'g140m',
@@ -329,6 +348,7 @@ class G140M(NIRSpec):
             r_scale=r_scale,
             flux_scale=flux_scale,
             pix_offset=pix_offset,
+            order_overlap=order_overlap,
         )
 
     def __repr__(self) -> str:
@@ -355,6 +375,10 @@ class G140H(NIRSpec):
         Token for the flux normalisation.
     pix_offset : PixOffset, optional
         Token for the detector pixel displacement.
+    order_overlap : Mapping[int, Callable], optional
+        Higher-order throughput ratios ``{order: r_m(wavelength)}``; see
+        :class:`~unite.instrument.base.Disperser` and
+        :func:`~unite.instrument.nirspec.order_overlap_from_msaexp`.
 
     Examples
     --------
@@ -371,6 +395,7 @@ class G140H(NIRSpec):
         r_scale: RScale | None = None,
         flux_scale: FluxScale | None = None,
         pix_offset: PixOffset | None = None,
+        order_overlap: Mapping[int, Callable[[ArrayLike], ArrayLike]] | None = None,
     ) -> None:
         super().__init__(
             'g140h',
@@ -379,6 +404,7 @@ class G140H(NIRSpec):
             r_scale=r_scale,
             flux_scale=flux_scale,
             pix_offset=pix_offset,
+            order_overlap=order_overlap,
         )
 
     def __repr__(self) -> str:
@@ -405,6 +431,10 @@ class G235M(NIRSpec):
         Token for the flux normalisation.
     pix_offset : PixOffset, optional
         Token for the detector pixel displacement.
+    order_overlap : Mapping[int, Callable], optional
+        Higher-order throughput ratios ``{order: r_m(wavelength)}``; see
+        :class:`~unite.instrument.base.Disperser` and
+        :func:`~unite.instrument.nirspec.order_overlap_from_msaexp`.
 
     Examples
     --------
@@ -421,6 +451,7 @@ class G235M(NIRSpec):
         r_scale: RScale | None = None,
         flux_scale: FluxScale | None = None,
         pix_offset: PixOffset | None = None,
+        order_overlap: Mapping[int, Callable[[ArrayLike], ArrayLike]] | None = None,
     ) -> None:
         super().__init__(
             'g235m',
@@ -429,6 +460,7 @@ class G235M(NIRSpec):
             r_scale=r_scale,
             flux_scale=flux_scale,
             pix_offset=pix_offset,
+            order_overlap=order_overlap,
         )
 
     def __repr__(self) -> str:
@@ -455,6 +487,10 @@ class G235H(NIRSpec):
         Token for the flux normalisation.
     pix_offset : PixOffset, optional
         Token for the detector pixel displacement.
+    order_overlap : Mapping[int, Callable], optional
+        Higher-order throughput ratios ``{order: r_m(wavelength)}``; see
+        :class:`~unite.instrument.base.Disperser` and
+        :func:`~unite.instrument.nirspec.order_overlap_from_msaexp`.
 
     Examples
     --------
@@ -471,6 +507,7 @@ class G235H(NIRSpec):
         r_scale: RScale | None = None,
         flux_scale: FluxScale | None = None,
         pix_offset: PixOffset | None = None,
+        order_overlap: Mapping[int, Callable[[ArrayLike], ArrayLike]] | None = None,
     ) -> None:
         super().__init__(
             'g235h',
@@ -479,6 +516,7 @@ class G235H(NIRSpec):
             r_scale=r_scale,
             flux_scale=flux_scale,
             pix_offset=pix_offset,
+            order_overlap=order_overlap,
         )
 
     def __repr__(self) -> str:
@@ -505,6 +543,10 @@ class G395M(NIRSpec):
         Token for the flux normalisation.
     pix_offset : PixOffset, optional
         Token for the detector pixel displacement.
+    order_overlap : Mapping[int, Callable], optional
+        Higher-order throughput ratios ``{order: r_m(wavelength)}``; see
+        :class:`~unite.instrument.base.Disperser` and
+        :func:`~unite.instrument.nirspec.order_overlap_from_msaexp`.
 
     Examples
     --------
@@ -521,6 +563,7 @@ class G395M(NIRSpec):
         r_scale: RScale | None = None,
         flux_scale: FluxScale | None = None,
         pix_offset: PixOffset | None = None,
+        order_overlap: Mapping[int, Callable[[ArrayLike], ArrayLike]] | None = None,
     ) -> None:
         super().__init__(
             'g395m',
@@ -529,6 +572,7 @@ class G395M(NIRSpec):
             r_scale=r_scale,
             flux_scale=flux_scale,
             pix_offset=pix_offset,
+            order_overlap=order_overlap,
         )
 
     def __repr__(self) -> str:
@@ -555,6 +599,10 @@ class G395H(NIRSpec):
         Token for the flux normalisation.
     pix_offset : PixOffset, optional
         Token for the detector pixel displacement.
+    order_overlap : Mapping[int, Callable], optional
+        Higher-order throughput ratios ``{order: r_m(wavelength)}``; see
+        :class:`~unite.instrument.base.Disperser` and
+        :func:`~unite.instrument.nirspec.order_overlap_from_msaexp`.
 
     Examples
     --------
@@ -571,6 +619,7 @@ class G395H(NIRSpec):
         r_scale: RScale | None = None,
         flux_scale: FluxScale | None = None,
         pix_offset: PixOffset | None = None,
+        order_overlap: Mapping[int, Callable[[ArrayLike], ArrayLike]] | None = None,
     ) -> None:
         super().__init__(
             'g395h',
@@ -579,6 +628,7 @@ class G395H(NIRSpec):
             r_scale=r_scale,
             flux_scale=flux_scale,
             pix_offset=pix_offset,
+            order_overlap=order_overlap,
         )
 
     def __repr__(self) -> str:

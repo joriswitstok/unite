@@ -157,6 +157,15 @@ def _disperser_to_entry(disperser: Disperser) -> dict:
     for attr in ('r_scale', 'flux_scale', 'pix_offset'):
         d[attr] = getattr(disperser, attr).name
 
+    if disperser.order_overlap:
+        warnings.warn(
+            f'Disperser {disperser.name!r} carries order_overlap for orders '
+            f'{sorted(disperser.order_overlap)}; order_overlap is runtime-only '
+            'and is not serialised. Re-attach it after loading the config.',
+            UserWarning,
+            stacklevel=3,
+        )
+
     return d
 
 

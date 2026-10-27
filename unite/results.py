@@ -371,6 +371,11 @@ def make_spectra_tables(
                 t[f'od_{name}'] = _compute_percentiles(
                     arr[:, pixel_mask], percentiles
                 ).T
+            if pred.overlap is not None:
+                t['order_overlap'] = u.Quantity(
+                    _compute_percentiles(pred.overlap[:, pixel_mask], percentiles).T,
+                    unit=spec_flux_unit,
+                )
         else:
             # (n_samples, n_pixels) → trim → transpose to (n_pixels, n_samples)
             t['model_total'] = u.Quantity(
@@ -382,6 +387,10 @@ def make_spectra_tables(
                 t[name] = u.Quantity(arr[:, pixel_mask].T, unit=spec_flux_unit)
             for name, arr in pred.tau_profiles.items():
                 t[f'od_{name}'] = arr[:, pixel_mask].T
+            if pred.overlap is not None:
+                t['order_overlap'] = u.Quantity(
+                    pred.overlap[:, pixel_mask].T, unit=spec_flux_unit
+                )
 
         # Add observed data columns.
         t['observed_flux'] = u.Quantity(

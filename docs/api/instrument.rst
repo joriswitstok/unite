@@ -33,6 +33,14 @@ NIRSpec Dispersers
    :undoc-members:
    :show-inheritance:
 
+NIRSpec Order Overlap
+---------------------
+
+.. automodule:: unite.instrument.nirspec.overlap
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 SDSS Disperser
 --------------
 

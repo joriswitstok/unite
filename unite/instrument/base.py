@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from astropy import units as u
 from jax.typing import ArrayLike
@@ -121,6 +121,10 @@ class Disperser(ABC):
     a single parameter in the model (identity-based, like ``FWHM``/
     ``Redshift`` on lines).
 
+    Optionally, ``order_overlap`` describes contamination by higher
+    diffraction orders (e.g. second-order light in NIRSpec G140M/F070LP
+    redwards of ~1.3 µm) as a deterministic throughput-ratio curve per order.
+
     Parameters
     ----------
     unit : astropy.units.UnitBase
@@ -139,6 +143,19 @@ class Disperser(ABC):
     pix_offset : PixOffset, optional
         Token for the detector pixel displacement.  ``None`` (default)
         creates a private token fixed at nominal (0.0).
+    order_overlap : Mapping[int, Callable], optional
+        Higher-order grating overlap: ``{m: r_m}`` where ``m >= 2`` is the
+        diffraction order and ``r_m(wavelength)`` is a JAX-jittable callable
+        returning the ratio of the order-*m* to first-order throughput at
+        the **observed** (first-order-calibrated) wavelength, in this
+        disperser's unit and in ``f_lambda`` convention.  The model
+        then adds ``r_m(λ) * F_1(λ / m)`` to the first-order model
+        ``F_1(λ)``, where ``F_1(λ / m)`` is pixel-integrated and
+        LSF-convolved at the order-*m* resolution ``R_m(λ / m) =
+        m R(λ / m)``, i.e. with ``R`` at the photon wavelength (see
+        :doc:`/usage/instrument`).  ``None`` (default) disables the term.
+        Runtime-only: not serialised by
+        :class:`~unite.instrument.config.InstrumentConfig`.
     """
 
     def __init__(
@@ -149,6 +166,7 @@ class Disperser(ABC):
         r_scale: RScale | None = None,
         flux_scale: FluxScale | None = None,
         pix_offset: PixOffset | None = None,
+        order_overlap: Mapping[int, Callable[[ArrayLike], ArrayLike]] | None = None,
     ) -> None:
         if r_scale is not None and not isinstance(r_scale, RScale):
             msg = f'r_scale must be an RScale token, got {type(r_scale).__name__}'
@@ -170,6 +188,7 @@ class Disperser(ABC):
         self.r_scale = r_scale if r_scale is not None else RScale()
         self.flux_scale = flux_scale if flux_scale is not None else FluxScale()
         self.pix_offset = pix_offset if pix_offset is not None else PixOffset()
+        self.order_overlap = _validate_order_overlap(order_overlap)
 
         # Apply the type prefix to any token that has a user-supplied label but
         # no site name yet.  Fully anonymous tokens (label=None, name=None) are
@@ -231,7 +250,54 @@ class Disperser(ABC):
         """
         lines = [repr(self)]
         lines.extend(format_calibration_sections([self]))
+        if self.order_overlap:
+            lines.append('')
+            orders = ', '.join(str(m) for m in self.order_overlap)
+            lines.append(f'  Order Overlap: {orders}')
         return '\n'.join(lines)
+
+
+def _validate_order_overlap(
+    order_overlap: Mapping[int, Callable[[ArrayLike], ArrayLike]] | None,
+) -> dict[int, Callable[[ArrayLike], ArrayLike]]:
+    """Validate and copy an ``order_overlap`` mapping (see :class:`Disperser`).
+
+    Parameters
+    ----------
+    order_overlap : Mapping[int, Callable] or None
+        ``{order: ratio_callable}``; ``None`` means no overlap.
+
+    Returns
+    -------
+    dict
+        A new dict with integer keys sorted in ascending order.  Empty when
+        *order_overlap* is ``None`` or empty.
+
+    Raises
+    ------
+    TypeError
+        If a key is not an integer or a value is not callable.
+    ValueError
+        If an order is smaller than 2.
+    """
+    if not order_overlap:
+        return {}
+    out: dict[int, Callable[[ArrayLike], ArrayLike]] = {}
+    for order, ratio in order_overlap.items():
+        if isinstance(order, bool) or not isinstance(order, int):
+            msg = f'order_overlap keys must be integers, got {order!r}'
+            raise TypeError(msg)
+        if order < 2:
+            msg = f'order_overlap orders must be >= 2, got {order}'
+            raise ValueError(msg)
+        if not callable(ratio):
+            msg = (
+                f'order_overlap[{order}] must be a callable ratio function, '
+                f'got {type(ratio).__name__}'
+            )
+            raise TypeError(msg)
+        out[order] = ratio
+    return dict(sorted(out.items()))
 
 
 def format_calibration_sections(dispersers: Sequence[Disperser]) -> list[str]:

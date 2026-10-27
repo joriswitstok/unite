@@ -13,9 +13,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from unite._compose import compose_leave_one_out
-from unite._lsf import _FWHM_TO_SIGMA, _lsf_convolve
-from unite.continuum.compute import eval_continuum_regions
+from unite._compose import compose_from_profiles, compose_leave_one_out
+from unite._lsf import _FWHM_TO_SIGMA, _lsf_convolve, _order_lsf_fwhm
+from unite.continuum.compute import eval_continuum, eval_continuum_regions
 from unite.line.compute import (
     _build_line_params,
     _peak_to_area_tau,
@@ -39,6 +39,10 @@ class SpectrumPrediction:
 
     For **absorption lines**, each entry in :attr:`lines` is the flux
     *removed* by that absorber (negative): ``total - total_without_j``.
+
+    When the spectrum's disperser carries ``order_overlap``, :attr:`overlap`
+    holds the summed higher-order contribution ``Σ_m r_m(λ) F_1(λ / m)`` and
+    ``sum(lines) + sum(continuum_regions) + overlap == total``.
     """
 
     #: Pixel-center wavelengths in the disperser's unit. Shape ``(n_pixels,)``.
@@ -59,6 +63,10 @@ class SpectrumPrediction:
     #: Keyed by line label; empty dict for emission-only models.
     #: Shape ``(n_samples, n_pixels)`` each.
     tau_profiles: dict[str, np.ndarray]
+    #: Higher-order grating overlap contribution (all orders summed), in
+    #: original flux units.  ``None`` when the disperser has no
+    #: ``order_overlap``.  Shape ``(n_samples, n_pixels)``.
+    overlap: np.ndarray | None = None
 
 
 def evaluate_model(
@@ -301,9 +309,42 @@ def evaluate_model(
                     has_tau=has_tau,
                 )
 
+                # Higher-order overlap on the fine grid: r_m(x) * F_1(x / m)
+                # (intrinsic), convolved per order with the first-order LSF of
+                # the photon wavelength x / m on the observed axis (R_m(λ) =
+                # m R_1(λ)).
+                overlap_pix = jnp.zeros(n_pixels)
+                for m, ratio in _disp.order_overlap.items():
+                    x_m = x_flat / m
+                    phi_m = _efn(x_m, centers, zero_lsf, p0, p1, p2, _pc)
+                    cont_m = eval_continuum(x_m, args, params, z_sys, 0.0)
+                    overlap_fine_m = ratio(
+                        x_flat * _inv_wl_scale
+                    ) * compose_from_profiles(
+                        phi_m,
+                        scaled_flux,
+                        tau_per_line,
+                        cm.is_tau,
+                        cm.applies_matrix,
+                        args.cont_applies,
+                        cont_m * _cont_scale,
+                        has_tau=has_tau,
+                    )
+                    sigma_m = (
+                        m
+                        * _order_lsf_fwhm(x_m, m, _disp.R, r_scale, _inv_wl_scale)
+                        * _FWHM_TO_SIGMA
+                    )
+                    overlap_pix = overlap_pix + (
+                        _lsf_convolve(x_flat, overlap_fine_m, sigma_m, half_width)
+                        .reshape(n_pixels, n_super)
+                        .mean(axis=1)
+                    )
+
                 # Convolve on fine grid, then pixel-average.
                 total_conv = _lsf_convolve(x_flat, total_fine, sigma_fine, half_width)
                 total_pix = total_conv.reshape(n_pixels, n_super).mean(axis=1)
+                total_pix = total_pix + overlap_pix
 
                 deltas_conv = jax.vmap(
                     lambda d: _lsf_convolve(x_flat, d, sigma_fine, half_width)
@@ -312,8 +353,15 @@ def evaluate_model(
 
                 total = flux_scale_val * total_pix
                 line_contribs = flux_scale_val * deltas_pix
+                overlap = flux_scale_val * overlap_pix
 
-                return total, line_contribs, cont_regions_scaled, tau_profiles_arr
+                return (
+                    total,
+                    line_contribs,
+                    cont_regions_scaled,
+                    tau_profiles_arr,
+                    overlap,
+                )
             else:
                 # Analytic: cumulative-at-edges per line, then diff + mask
                 # → per-pixel-averaged profile.
@@ -333,20 +381,54 @@ def evaluate_model(
                     has_tau=has_tau,
                 )
 
-            # Apply flux_scale to total and per-line contributions.
+                # Higher-order overlap: F_1 pixel-averaged over edges / m and
+                # continuum at pixel centres / m, both with the order-m LSF at
+                # the intrinsic (photon) wavelength (R_m(λ) = m R_1(λ)),
+                # scaled by r_m(λ_obs).
+                overlap = jnp.zeros_like(total)
+                if _disp.order_overlap:
+                    for m, ratio in _disp.order_overlap.items():
+                        e_m = edges / m
+                        lsf_m = _order_lsf_fwhm(e_m, m, _disp.R, r_scale, _inv_wl_scale)
+                        cum_m = _ifn(e_m, centers, lsf_m, p0, p1, p2, _pc)
+                        pixints_m = (jnp.diff(cum_m, axis=1) / jnp.diff(e_m))[:, _keep]
+                        wl_m = wavelength / m
+                        cont_lsf_m = _order_lsf_fwhm(
+                            wl_m, m, _disp.R, r_scale, _inv_wl_scale
+                        )
+                        cont_m = eval_continuum(wl_m, args, params, z_sys, cont_lsf_m)
+                        overlap = overlap + ratio(
+                            wavelength * _inv_wl_scale
+                        ) * compose_from_profiles(
+                            pixints_m,
+                            scaled_flux,
+                            tau_per_line,
+                            cm.is_tau,
+                            cm.applies_matrix,
+                            args.cont_applies,
+                            cont_m * _cont_scale,
+                            has_tau=has_tau,
+                        )
+                    total = total + overlap
+
+            # Apply flux_scale to total, per-line and overlap contributions.
             total = flux_scale_val * total
             line_contribs = flux_scale_val * line_contribs
+            overlap = flux_scale_val * overlap
 
-            return total, line_contribs, cont_regions_scaled, tau_profiles_arr
+            return total, line_contribs, cont_regions_scaled, tau_profiles_arr, overlap
 
         # Build JIT'd vmapped evaluator once per spectrum; reuse on subsequent calls.
         if args._evaluators[i] is None:
             args._evaluators[i] = jax.jit(jax.vmap(_single))
-        total_arr, line_arr, cont_arr, tau_arr = args._evaluators[i](context)
-        # total_arr:  (n_samples, n_pix)
-        # line_arr:   (n_samples, n_lines, n_pix)
-        # cont_arr:   list of (n_samples, n_pix), one per continuum region
-        # tau_arr:    (n_samples, n_lines, n_pix)
+        total_arr, line_arr, cont_arr, tau_arr, overlap_arr = args._evaluators[i](
+            context
+        )
+        # total_arr:   (n_samples, n_pix)
+        # line_arr:    (n_samples, n_lines, n_pix)
+        # cont_arr:    list of (n_samples, n_pix), one per continuum region
+        # tau_arr:     (n_samples, n_lines, n_pix)
+        # overlap_arr: (n_samples, n_pix); all zeros without order_overlap
 
         # Transfer line and tau arrays to host once, then use zero-copy NumPy
         # views for per-line slicing.  Individual np.asarray(jax_arr[:, j, :])
@@ -378,6 +460,7 @@ def evaluate_model(
                 lines=lines_dict,
                 continuum_regions=cont_dict,
                 tau_profiles=tau_dict,
+                overlap=np.asarray(overlap_arr) if disp.order_overlap else None,
             )
         )
 

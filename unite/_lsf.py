@@ -8,6 +8,7 @@ All operations are JAX-jittable and compatible with numpyro inference engines.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
@@ -15,6 +16,48 @@ from jax.typing import ArrayLike
 
 #: Conversion factor from FWHM to Gaussian sigma: ``1 / (2 * sqrt(2 * ln 2))``.
 _FWHM_TO_SIGMA: float = 1.0 / (2.0 * math.sqrt(2.0 * math.log(2.0)))
+
+
+def _order_lsf_fwhm(
+    wavelength: ArrayLike,
+    order: int,
+    R_func: Callable[[ArrayLike], ArrayLike],  # noqa: N803
+    r_scale: ArrayLike,
+    inv_wl_scale: float,
+) -> jnp.ndarray:
+    """LSF FWHM of order-*m* light, in its own (intrinsic) wavelength.
+
+    Light of wavelength ``λ`` forms the same image on the detector (the same
+    number of pixels) in every diffraction order, while the dispersion of
+    order *m* is *m* times the first-order dispersion.  The resolving power
+    of order *m* is therefore ``R_m(λ) = m R_1(λ)``, with ``R_1`` evaluated
+    at the **photon** wavelength ``λ`` (not at the first-order wavelength
+    ``m λ`` of the pixel where the light lands), and the LSF FWHM in
+    intrinsic wavelength is ``λ / (m R_1(λ))``.  On the observed
+    (first-order) wavelength axis this is ``m`` times larger, i.e. the
+    first-order LSF FWHM of light of wavelength ``λ``.
+
+    Parameters
+    ----------
+    wavelength : array_like
+        Intrinsic wavelength ``λ`` of the order-*m* light (canonical unit).
+    order : int
+        Diffraction order *m* (``1`` gives the first-order LSF).
+    R_func : callable
+        First-order resolving power ``R_1`` (the disperser's ``R``), taking
+        wavelengths in the disperser's unit.
+    r_scale : array_like
+        Resolution scale factor (may be traced).
+    inv_wl_scale : float
+        Conversion factor from the canonical unit to the disperser's unit.
+
+    Returns
+    -------
+    jnp.ndarray
+        LSF FWHM in intrinsic wavelength (canonical unit).
+    """
+    wavelength = jnp.asarray(wavelength)
+    return wavelength / (order * R_func(wavelength * inv_wl_scale) * r_scale)
 
 
 def _lsf_convolve(
